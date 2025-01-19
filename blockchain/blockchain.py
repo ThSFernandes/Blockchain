@@ -1,12 +1,15 @@
 import hashlib
 import json
+import requests
 from time import time
 from urllib.parse import urlparse
 from uuid import uuid4
-
+import os
 import requests
 from flask import Flask, jsonify, request
 
+# Caminho do arquivo de nós
+NODES_FILE = 'nodes.txt'
 
 class Blockchain:
     def __init__(self):
@@ -14,48 +17,40 @@ class Blockchain:
         self.chain = []
         self.nodes = set()
 
-        # Create the genesis block
+        # Cria o bloco gênese
         self.new_block(previous_hash='1', proof=100)
 
     def register_node(self, address):
         """
-        Add a new node to the list of nodes
-
-        :param address: Address of node. Eg. 'http://192.168.0.5:5000'
+        Adiciona um novo nó à lista de nós
+        :param address: Endereço do nó. Exemplo: 'http://192.168.0.5:5000'
         """
-
         parsed_url = urlparse(address)
         if parsed_url.netloc:
             self.nodes.add(parsed_url.netloc)
         elif parsed_url.path:
-            # Accepts an URL without scheme like '192.168.0.5:5000'.
+            # Aceita um URL sem esquema como '192.168.0.5:5000'
             self.nodes.add(parsed_url.path)
         else:
-            raise ValueError('Invalid URL')
-
+            raise ValueError('URL inválido')
 
     def valid_chain(self, chain):
         """
-        Determine if a given blockchain is valid
-
-        :param chain: A blockchain
-        :return: True if valid, False if not
+        Determina se uma blockchain é válida
+        :param chain: Uma blockchain
+        :return: True se for válida, False se não for
         """
-
         last_block = chain[0]
         current_index = 1
 
         while current_index < len(chain):
             block = chain[current_index]
-            print(f'{last_block}')
-            print(f'{block}')
-            print("\n-----------\n")
-            # Check that the hash of the block is correct
+            # Verifica se o hash do bloco está correto
             last_block_hash = self.hash(last_block)
             if block['previous_hash'] != last_block_hash:
                 return False
 
-            # Check that the Proof of Work is correct
+            # Verifica se o Proof of Work está correto
             if not self.valid_proof(last_block['proof'], block['proof'], last_block_hash):
                 return False
 
@@ -66,47 +61,84 @@ class Blockchain:
 
     def resolve_conflicts(self):
         """
-        This is our consensus algorithm, it resolves conflicts
-        by replacing our chain with the longest one in the network.
-
-        :return: True if our chain was replaced, False if not
+        Algoritmo de consenso que resolve conflitos substituindo a nossa blockchain
+        pela blockchain válida mais longa que contenha o bloco de consenso (hash mais votada e mais recente).
+        :return: True se a nossa cadeia foi substituída, False caso contrário.
         """
-
         neighbours = self.nodes
-        new_chain = None
+        valid_hashes = {}
+        all_chains = []  # Variável para armazenar todas as blockchains
 
-        # We're only looking for chains longer than ours
-        max_length = len(self.chain)
-
-        # Grab and verify the chains from all the nodes in our network
+        # Verifica as cadeias dos nós vizinhos e armazena as blockchains
         for node in neighbours:
-            response = requests.get(f'http://{node}/chain')
+            try:
+                response = requests.get(f'http://{node}/chain')
+                if response.status_code == 200:
+                    chain = response.json()['chain']
+                    all_chains.append(chain)
+                    chain_hashes = [self.hash(block) for block in chain]
 
-            if response.status_code == 200:
-                length = response.json()['length']
-                chain = response.json()['chain']
+                    # Armazena hashes, votos e posições
+                    for index, hash_value in enumerate(chain_hashes):
+                        if hash_value not in valid_hashes:
+                            valid_hashes[hash_value] = {"votes": 1, "position": index}
+                        else:
+                            valid_hashes[hash_value]["votes"] += 1
+                            valid_hashes[hash_value]["position"] = max(valid_hashes[hash_value]["position"], index)
 
-                # Check if the length is longer and the chain is valid
-                if length > max_length and self.valid_chain(chain):
-                    max_length = length
-                    new_chain = chain
+            except Exception as e:
+                print(f"Erro ao conectar com {node}: {e}")
 
-        # Replace our chain if we discovered a new, valid chain longer than ours
-        if new_chain:
+        if not valid_hashes:
+            # Sem hashes válidas
+            return False
+
+        # Encontrar a hash com mais votos
+        max_votes = max(hash_data["votes"] for hash_data in valid_hashes.values())
+        candidate_hashes = [
+            hash_value
+            for hash_value, hash_data in valid_hashes.items()
+            if hash_data["votes"] == max_votes
+        ]
+
+        # Entre as hashes com mais votos, encontrar a mais recente (maior posição)
+        most_valid_hash = max(
+            candidate_hashes,
+            key=lambda h: valid_hashes[h]["position"],
+        )
+        print(f"Hash mais validada: {most_valid_hash} com {max_votes} votos e posição {valid_hashes[most_valid_hash]['position']}.")
+
+        # Encontrar todas as blockchains que contêm o bloco de consenso
+        valid_chains = [
+            chain for chain in all_chains
+            if most_valid_hash in [self.hash(block) for block in chain]
+        ]
+
+        if not valid_chains:
+            # Nenhuma blockchain contém o bloco de consenso
+            return False
+
+        # Escolher a blockchain mais longa entre as válidas
+        new_chain = max(valid_chains, key=len)
+
+        # Substituir a cadeia local se a nova cadeia for mais longa
+        if len(new_chain) > len(self.chain):
             self.chain = new_chain
+            print("Cadeia substituída pela mais longa e válida.")
             return True
 
+        print("Cadeia atual é a mais longa e válida.")
         return False
+
+
 
     def new_block(self, proof, previous_hash):
         """
-        Create a new Block in the Blockchain
-
-        :param proof: The proof given by the Proof of Work algorithm
-        :param previous_hash: Hash of previous Block
-        :return: New Block
+        Cria um novo bloco na blockchain
+        :param proof: O proof dado pelo algoritmo Proof of Work
+        :param previous_hash: O hash do bloco anterior
+        :return: Novo bloco
         """
-
         block = {
             'index': len(self.chain) + 1,
             'timestamp': time(),
@@ -115,7 +147,7 @@ class Blockchain:
             'previous_hash': previous_hash or self.hash(self.chain[-1]),
         }
 
-        # Reset the current list of transactions
+        # Reseta a lista de transações
         self.current_transactions = []
 
         self.chain.append(block)
@@ -123,12 +155,11 @@ class Blockchain:
 
     def new_transaction(self, sender, recipient, amount):
         """
-        Creates a new transaction to go into the next mined Block
-
-        :param sender: Address of the Sender
-        :param recipient: Address of the Recipient
-        :param amount: Amount
-        :return: The index of the Block that will hold this transaction
+        Cria uma nova transação para ser adicionada ao próximo bloco
+        :param sender: Endereço do remetente
+        :param recipient: Endereço do destinatário
+        :param amount: Quantidade
+        :return: O índice do bloco que conterá essa transação
         """
         self.current_transactions.append({
             'sender': sender,
@@ -145,26 +176,21 @@ class Blockchain:
     @staticmethod
     def hash(block):
         """
-        Creates a SHA-256 hash of a Block
-
-        :param block: Block
+        Cria um hash SHA-256 de um bloco
+        :param block: Bloco
+        :return: Hash do bloco
         """
-
-        # We must make sure that the Dictionary is Ordered, or we'll have inconsistent hashes
         block_string = json.dumps(block, sort_keys=True).encode()
         return hashlib.sha256(block_string).hexdigest()
 
     def proof_of_work(self, last_block):
         """
-        Simple Proof of Work Algorithm:
-
-         - Find a number p' such that hash(pp') contains leading 4 zeroes
-         - Where p is the previous proof, and p' is the new proof
-         
-        :param last_block: <dict> last Block
-        :return: <int>
+        Algoritmo simples de Proof of Work:
+         - Encontrar um número p' tal que hash(pp') contenha 4 zeros à frente
+         - Onde p é o proof anterior, e p' é o novo proof
+        :param last_block: O último bloco
+        :return: Novo proof
         """
-
         last_proof = last_block['proof']
         last_hash = self.hash(last_block)
 
@@ -177,50 +203,65 @@ class Blockchain:
     @staticmethod
     def valid_proof(last_proof, proof, last_hash):
         """
-        Validates the Proof
-
-        :param last_proof: <int> Previous Proof
-        :param proof: <int> Current Proof
-        :param last_hash: <str> The hash of the Previous Block
-        :return: <bool> True if correct, False if not.
-
+        Valida o proof
+        :param last_proof: Proof anterior
+        :param proof: Proof atual
+        :param last_hash: Hash do último bloco
+        :return: True se válido, False caso contrário
         """
-
         guess = f'{last_proof}{proof}{last_hash}'.encode()
         guess_hash = hashlib.sha256(guess).hexdigest()
         return guess_hash[:4] == "0000"
 
 
-# Instantiate the Node
+# Funções de leitura e gravação dos nós
+def read_nodes_from_file():
+    if not os.path.exists(NODES_FILE):
+        return []
+
+    with open(NODES_FILE, 'r') as file:
+        return [line.strip() for line in file.readlines()]
+
+def add_node_to_file(node_url):
+    with open(NODES_FILE, 'a') as file:
+        file.write(f"{node_url}\n")
+
+
+# Função para registrar nós automaticamente
+def register_nodes_automatically(new_node_url):
+    nodes = read_nodes_from_file()  # Lê os nós registrados no arquivo
+    for node in nodes:
+        if node != new_node_url:  # Não registra o próprio nó
+            url = f"{new_node_url}/nodes/register"
+            payload = {"nodes": [node]}
+            try:
+                response = requests.post(url, json=payload)
+                print(f"Node {node} registrado com sucesso no {new_node_url}: {response.status_code}")
+            except requests.exceptions.RequestException as e:
+                print(f"Erro ao registrar o nó {node} no {new_node_url}: {e}")
+
+# Inicializa o app Flask
 app = Flask(__name__)
-
-# Generate a globally unique address for this node
-node_identifier = str(uuid4()).replace('-', '')
-
-# Instantiate the Blockchain
+node_identifier = str(uuid4()).replace('-', '')  # Identificador único para o nó
 blockchain = Blockchain()
-
 
 @app.route('/mine', methods=['GET'])
 def mine():
-    # We run the proof of work algorithm to get the next proof...
+    # Pegando o bloco atual (último bloco da cadeia)
     last_block = blockchain.last_block
+    
+    # Minerando o bloco
     proof = blockchain.proof_of_work(last_block)
+    blockchain.new_transaction(sender="0", recipient=node_identifier, amount=1)
 
-    # We must receive a reward for finding the proof.
-    # The sender is "0" to signify that this node has mined a new coin.
-    blockchain.new_transaction(
-        sender="0",
-        recipient=node_identifier,
-        amount=1,
-    )
-
-    # Forge the new Block by adding it to the chain
     previous_hash = blockchain.hash(last_block)
     block = blockchain.new_block(proof, previous_hash)
 
+    # Imprimindo o novo bloco
+    print(f"Bloco minerado: {block}")
+
     response = {
-        'message': "New Block Forged",
+        'message': "Novo bloco minerado",
         'index': block['index'],
         'transactions': block['transactions'],
         'proof': block['proof'],
@@ -229,19 +270,21 @@ def mine():
     return jsonify(response), 200
 
 
+
 @app.route('/transactions/new', methods=['POST'])
 def new_transaction():
     values = request.get_json()
 
-    # Check that the required fields are in the POST'ed data
     required = ['sender', 'recipient', 'amount']
     if not all(k in values for k in required):
-        return 'Missing values', 400
+        return 'Valores ausentes', 400
 
-    # Create a new Transaction
+    # Verificar se a transação está sendo registrada corretamente
+    print(f"Transação recebida: {values}")
+
     index = blockchain.new_transaction(values['sender'], values['recipient'], values['amount'])
 
-    response = {'message': f'Transaction will be added to Block {index}'}
+    response = {'message': f'Transação será adicionada ao bloco {index}'}
     return jsonify(response), 201
 
 
@@ -253,24 +296,22 @@ def full_chain():
     }
     return jsonify(response), 200
 
-
 @app.route('/nodes/register', methods=['POST'])
 def register_nodes():
     values = request.get_json()
 
     nodes = values.get('nodes')
     if nodes is None:
-        return "Error: Please supply a valid list of nodes", 400
+        return "Erro: Por favor forneça uma lista válida de nós", 400
 
     for node in nodes:
         blockchain.register_node(node)
 
     response = {
-        'message': 'New nodes have been added',
+        'message': 'Novos nós foram adicionados',
         'total_nodes': list(blockchain.nodes),
     }
     return jsonify(response), 201
-
 
 @app.route('/nodes/resolve', methods=['GET'])
 def consensus():
@@ -278,24 +319,68 @@ def consensus():
 
     if replaced:
         response = {
-            'message': 'Our chain was replaced',
+            'message': 'Nossa cadeia foi substituída',
             'new_chain': blockchain.chain
         }
     else:
         response = {
-            'message': 'Our chain is authoritative',
+            'message': 'Nossa cadeia é autoritativa',
             'chain': blockchain.chain
         }
 
     return jsonify(response), 200
 
 
+def add_node_to_file(node_url):
+    """
+    Adiciona o nó à lista de nós no arquivo `nodes.txt`.
+    """
+    with open('nodes.txt', 'a') as file:
+        file.write(f"{node_url}\n")
+    print(f"Nó {node_url} registrado no arquivo de nós.")
+
+
+def register_nodes_automatically(node_url):
+    """
+    Registra este nó automaticamente nos outros nós existentes.
+    """
+    # Lê os nós do arquivo
+    try:
+        with open('nodes.txt', 'r') as file:
+            nodes = file.readlines()
+        
+        for node in nodes:
+            node = node.strip()  # Remover possíveis espaços extras ou quebras de linha
+            if node != node_url:  # Não tentar registrar o nó atual em si mesmo
+                try:
+                    # Garantir que a URL está corretamente formatada com "http://"
+                    if not node.startswith('http://'):
+                        node = 'http://' + node
+                    
+                    response = requests.post(f'{node}/nodes/register', json={"nodes": [node_url]})
+                    if response.status_code == 201:
+                        print(f"Registro do nó {node_url} em {node} bem-sucedido.")
+                    else:
+                        print(f"Erro ao registrar nó {node_url} em {node}: {response.text}")
+                except requests.exceptions.RequestException as e:
+                    print(f"Erro ao tentar registrar nó {node_url} em {node}: {str(e)}")
+    except FileNotFoundError:
+        print("Arquivo de nós não encontrado. Certifique-se de que o arquivo 'nodes.txt' existe.")
+
+# novas
+
+
 if __name__ == '__main__':
     from argparse import ArgumentParser
 
     parser = ArgumentParser()
-    parser.add_argument('-p', '--port', default=5000, type=int, help='port to listen on')
+    parser.add_argument('-p', '--port', default=5000, type=int, help='Porta para escutar')
     args = parser.parse_args()
     port = args.port
 
-    app.run(host='0.0.0.0', port=port)
+    # Registra os nós automaticamente ao iniciar o servidor
+    register_nodes_automatically(f'http://127.0.0.1:{port}')
+
+    app.run(host='127.0.0.1', port=port)
+
+
