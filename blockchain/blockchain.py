@@ -118,18 +118,17 @@ class Blockchain:
             # Nenhuma blockchain contém o bloco de consenso
             return False
 
-        # Escolher a blockchain mais longa entre as válidas
-        new_chain = max(valid_chains, key=len)
+        # Escolher a blockchain mais longa ou com a hash do último bloco maior
+        new_chain = max(valid_chains, key=lambda chain: (len(chain), self.hash(chain[-1])))
 
-        # Substituir a cadeia local se a nova cadeia for mais longa
-        if len(new_chain) > len(self.chain):
+        # Substituir a cadeia local se a nova cadeia for mais longa ou se o último bloco for diferente
+        if len(new_chain) > len(self.chain) or new_chain[-1] != self.chain[-1]:
             self.chain = new_chain
             print("Cadeia substituída pela mais longa e válida.")
             return True
 
         print("Cadeia atual é a mais longa e válida.")
         return False
-
 
 
     def new_block(self, proof, previous_hash):
@@ -312,6 +311,19 @@ def register_nodes():
         'total_nodes': list(blockchain.nodes),
     }
     return jsonify(response), 201
+
+@app.route('/transactions', methods=['GET'])
+def get_transactions():
+    """
+    Endpoint para exibir todas as transações na blockchain.
+    """
+    # Retorna a lista de transações na blockchain
+    response = {
+        'transactions': blockchain.current_transactions,
+        'total_transactions': len(blockchain.current_transactions),
+    }
+    return jsonify(response), 200
+
 
 @app.route('/nodes/resolve', methods=['GET'])
 def consensus():
